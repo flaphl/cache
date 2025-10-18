@@ -2,9 +2,6 @@
 
 **PSR-6 cache implementation pulled from Flaphl elements.**
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
-[![PHP Version](https://img.shields.io/badge/PHP-^8.2-blue.svg)](https://php.net)
-
 ## Installation
 
 ```bash
