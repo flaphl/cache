@@ -2,6 +2,7 @@
 
 namespace Flaphl\Element\Cache\Adapter;
 
+use Flaphl\Contracts\Cache\ItemInterface;
 use Flaphl\Element\Cache\CacheItem;
 use Flaphl\Element\Cache\Exception\InvalidArgumentException;
 use Flaphl\Element\Cache\Exception\LogicException;
@@ -48,6 +49,8 @@ class TagAwareAdapter implements TagAwareAdapterInterface
 
     /**
      * {@inheritdoc}
+     * 
+     * @return CacheItem The cache item (which implements ItemInterface with tag() method)
      */
     public function getItem(string $key): CacheItemInterface
     {
