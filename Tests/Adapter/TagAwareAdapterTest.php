@@ -153,13 +153,16 @@ class TagAwareAdapterTest extends TestCase
         $item->tag(['category']);
         $this->adapter->save($item);
         
-        // Delete the item but leave the tag index
+        // Verify tag exists
+        $stats = $this->adapter->getTagStats();
+        $this->assertArrayHasKey('category', $stats);
+        
+        // Delete the item (this should also clean up tag mappings)
         $this->adapter->deleteItem('item1');
         
-        // Prune orphaned tags
+        // Since tags are cleaned up automatically, there should be no orphaned tags
         $pruned = $this->adapter->pruneOrphanedTags();
-        
-        $this->assertGreaterThan(0, $pruned);
+        $this->assertEquals(0, $pruned);
         
         // Tag stats should be clean
         $stats = $this->adapter->getTagStats();

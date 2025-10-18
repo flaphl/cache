@@ -137,17 +137,25 @@ class TagAwareAdapter implements TagAwareAdapterInterface
             $existingTags = $existingItem->getTags();
         }
 
+        if ($item instanceof CacheItem) {
+            $currentTags = $item->getTags();
+            
+            // Validate and limit tag count BEFORE saving
+            if (count($currentTags) > $this->config['max_tags_per_item']) {
+                $limitedTags = array_slice($currentTags, 0, $this->config['max_tags_per_item']);
+                // Use reflection to directly set the tags property
+                $reflection = new \ReflectionClass($item);
+                $tagsProperty = $reflection->getProperty('tags');
+                $tagsProperty->setAccessible(true);
+                $tagsProperty->setValue($item, $limitedTags);
+                $currentTags = $limitedTags;
+            }
+        }
+
         $success = $this->adapter->save($item);
         
         if ($success && $item instanceof CacheItem) {
             $currentTags = $item->getTags();
-            
-            // Validate tag limits
-            if (count($currentTags) > $this->config['max_tags_per_item']) {
-                throw InvalidArgumentException::forInvalidTag(
-                    'Too many tags: maximum ' . $this->config['max_tags_per_item'] . ' allowed'
-                );
-            }
             
             // Update tag mappings
             $this->updateTagMappings($item->getKey(), $existingTags, $currentTags);
@@ -279,17 +287,15 @@ class TagAwareAdapter implements TagAwareAdapterInterface
      */
     public function getAllTags(): array
     {
-        $tags = [];
-        $tagIndexKeys = $this->getTagIndexKeys();
+        $masterTagListKey = $this->tagPrefix . '__master_tag_list__';
+        $item = $this->tagIndex->getItem($masterTagListKey);
         
-        foreach ($tagIndexKeys as $tagIndexKey) {
-            $tag = $this->extractTagFromIndexKey($tagIndexKey);
-            if ($tag) {
-                $tags[] = $tag;
-            }
+        if ($item->isHit()) {
+            $tags = $item->get();
+            return is_array($tags) ? $tags : [];
         }
         
-        return array_unique($tags);
+        return [];
     }
 
     /**
@@ -301,28 +307,13 @@ class TagAwareAdapter implements TagAwareAdapterInterface
             return [];
         }
         
-        $stats = [
-            'total_tags' => 0,
-            'total_tagged_items' => 0,
-            'average_tags_per_item' => 0,
-            'tags_distribution' => [],
-        ];
-        
+        $stats = [];
         $tags = $this->getAllTags();
-        $stats['total_tags'] = count($tags);
         
-        $totalTaggedItems = 0;
         foreach ($tags as $tag) {
             $keys = $this->getKeysForTag($tag);
-            $itemCount = count($keys);
-            $stats['tags_distribution'][$tag] = $itemCount;
-            $totalTaggedItems += $itemCount;
+            $stats[$tag] = count($keys);
         }
-        
-        $stats['total_tagged_items'] = $totalTaggedItems;
-        $stats['average_tags_per_item'] = $stats['total_tags'] > 0 
-            ? $totalTaggedItems / $stats['total_tags'] 
-            : 0;
         
         return $stats;
     }
@@ -425,9 +416,9 @@ class TagAwareAdapter implements TagAwareAdapterInterface
         $stats = $this->adapter->getStats();
         $tagStats = $this->getTagStats();
         
-        // Include tag stats directly in the main stats array
-        $stats['tag_count'] = $tagStats['total_tags'] ?? 0;
-        $stats['tagged_items'] = $tagStats['total_tagged_items'] ?? 0;
+        // Calculate tag statistics from the simplified format
+        $stats['tag_count'] = count($tagStats);
+        $stats['tagged_items'] = array_sum($tagStats);
         $stats['tag_stats'] = $tagStats;
         
         return $stats;
@@ -622,6 +613,9 @@ class TagAwareAdapter implements TagAwareAdapterInterface
             }
             
             $this->tagIndex->save($item);
+            
+            // Update master tag list
+            $this->addToMasterTagList($tag);
         }
     }
 
@@ -652,6 +646,8 @@ class TagAwareAdapter implements TagAwareAdapterInterface
             
             if (empty($keys)) {
                 $this->tagIndex->deleteItem($tagIndexKey);
+                // Remove from master tag list when tag has no more items
+                $this->removeFromMasterTagList($tag);
             } else {
                 $item->set($keys);
                 $this->tagIndex->save($item);
@@ -701,8 +697,19 @@ class TagAwareAdapter implements TagAwareAdapterInterface
      */
     private function getTagIndexKeys(): array
     {
-        // This would need adapter-specific implementation to scan for keys
-        // with the tag prefix. For now, return empty array.
+        $masterTagListKey = $this->tagPrefix . '__master_tag_list__';
+        var_dump('Getting tag index keys, master key:', $masterTagListKey);
+        $item = $this->tagIndex->getItem($masterTagListKey);
+        
+        var_dump('Master item hit?', $item->isHit());
+        
+        if ($item->isHit()) {
+            $tags = $item->get();
+            var_dump('Retrieved master tags:', $tags);
+            return is_array($tags) ? array_map([$this, 'getTagIndexKey'], $tags) : [];
+        }
+        
+        var_dump('No master tag list found');
         return [];
     }
 
@@ -741,6 +748,56 @@ class TagAwareAdapter implements TagAwareAdapterInterface
 
         if (preg_match('/[{}()\\/\\\\@]/', $tag)) {
             throw InvalidArgumentException::forInvalidTag('Tag contains reserved characters: ' . $tag);
+        }
+    }
+
+    /**
+     * Add a tag to the master tag list.
+     *
+     * @param string $tag The tag to add
+     */
+    private function addToMasterTagList(string $tag): void
+    {
+        $masterTagListKey = $this->tagPrefix . '__master_tag_list__';
+        $item = $this->tagIndex->getItem($masterTagListKey);
+        
+        $tags = $item->isHit() ? $item->get() : [];
+        if (!is_array($tags)) {
+            $tags = [];
+        }
+        
+        if (!in_array($tag, $tags)) {
+            $tags[] = $tag;
+            $item->set($tags);
+            $this->tagIndex->save($item);
+        }
+    }
+
+    /**
+     * Remove a tag from the master tag list.
+     *
+     * @param string $tag The tag to remove
+     */
+    private function removeFromMasterTagList(string $tag): void
+    {
+        $masterTagListKey = $this->tagPrefix . '__master_tag_list__';
+        $item = $this->tagIndex->getItem($masterTagListKey);
+        
+        if (!$item->isHit()) {
+            return;
+        }
+        
+        $tags = $item->get();
+        if (!is_array($tags)) {
+            return;
+        }
+        
+        $tagIndex = array_search($tag, $tags);
+        if (false !== $tagIndex) {
+            unset($tags[$tagIndex]);
+            $tags = array_values($tags); // Reindex array
+            $item->set($tags);
+            $this->tagIndex->save($item);
         }
     }
 }
