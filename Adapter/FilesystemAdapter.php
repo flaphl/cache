@@ -58,6 +58,11 @@ class FilesystemAdapter implements AdapterInterface
             'hash_algo' => 'xxh128',
             'enable_gc' => true,
             'gc_probability' => 0.01,
+            // Security-oriented defaults:
+            // - prefer_json: if true, cache files will be persisted as JSON (safer).
+            // - allow_unserialize_objects: if false, unserialize() will be invoked with allowed_classes => false.
+            'prefer_json' => false,
+            'allow_unserialize_objects' => false,
         ], $config);
 
         $this->ensureDirectoryExists();
@@ -544,9 +549,33 @@ class FilesystemAdapter implements AdapterInterface
             throw new \RuntimeException('Failed to read cache file: ' . $filePath);
         }
 
-        $data = unserialize($content);
-        if (false === $data) {
-            throw new \RuntimeException('Failed to unserialize cache data from: ' . $filePath);
+        // If configured to prefer JSON storage, try JSON first
+        if (!empty($this->config['prefer_json'])) {
+            $json = json_decode($content, true);
+            if (json_last_error() === JSON_ERROR_NONE && is_array($json)) {
+                $data = $json;
+            } else {
+                throw new \RuntimeException('Failed to decode JSON cache data from: ' . $filePath);
+            }
+        } else {
+            // Use unserialize with object instantiation disabled by default
+            $allowed = $this->config['allow_unserialize_objects'] ? null : ['allowed_classes' => false];
+            $data = @unserialize($content, $allowed);
+
+            // If unserialize failed or returned non-array, try JSON as a fallback for migrated files
+            if (!is_array($data)) {
+                $json = json_decode($content, true);
+                if (json_last_error() === JSON_ERROR_NONE && is_array($json)) {
+                    $data = $json;
+                } else {
+                    throw new \RuntimeException('Failed to unserialize or decode cache data from: ' . $filePath);
+                }
+            }
+        }
+
+        // Basic structural validation
+        if (!is_array($data) || !array_key_exists('value', $data)) {
+            throw new \RuntimeException('Invalid cache data structure in: ' . $filePath);
         }
 
         return $data;
@@ -561,7 +590,15 @@ class FilesystemAdapter implements AdapterInterface
      */
     private function writeFile(string $filePath, array $data): bool
     {
-        $content = serialize($data);
+        if (!empty($this->config['prefer_json'])) {
+            $content = json_encode($data, JSON_UNESCAPED_UNICODE);
+            if ($content === false) {
+                return false;
+            }
+        } else {
+            $content = serialize($data);
+        }
+
         $tempFile = $filePath . '.tmp.' . uniqid();
         
         if (false === file_put_contents($tempFile, $content, LOCK_EX)) {
@@ -731,7 +768,7 @@ class FilesystemAdapter implements AdapterInterface
             throw InvalidArgumentException::forInvalidKey($key, 'Key cannot be longer than 250 characters');
         }
 
-        if (preg_match('/[{}()\\/\\\\@:]/', $key)) {
+        if (preg_match('/[{}()\/\\@:]/', $key)) {
             throw InvalidArgumentException::forInvalidKey($key, 'Key contains reserved characters');
         }
     }
